@@ -6,7 +6,12 @@ This is a proof of concept for a twitter profile archiver. It downloads all publ
 - BeautifulSoup4
 
 ## How to use this tool:
-Clone this repository, ensure you have all required dependencies and from the project's main directory launch it as a module: `python3 -m tweetarchiver <username>`, where <username> is the account name whose tweets you wish to download.
+Clone this repository, ensure you have all required dependencies and from the project's root directory launch it as a module: `python3 -m tweetarchiver username`, where `username` is the account name whose tweets you wish to download.
+
+## Interpreting output:
+Tweets are saved in a csv file. The fields are as follows: tweet ID, conversation ID (the first ID in the thread), up to four media links, tweet text.
+This means variable width: ranging from 3 to 7 fields.
+Example output can be seen in the 'example-csv-output-drl.csv', which contains the first 40 tweets from dril's account.
 
 ## Caveats:
 - This is almost certainly against Twitter's ToS (I'm circumventing the status lookup limit enforced by their API by using the web search)
