@@ -1,11 +1,13 @@
 import sys
-import logging
+from pathlib import Path
 
 from sqlalchemy.orm import sessionmaker
 
 import tweetarchiver
 
-LOGGER = logging.getLogger()
+# getLogger returns logger with different level and config than the one in __init__
+# I'm not really sure why that happens
+LOGGER = tweetarchiver.LOGGER
 
 def main() -> None:
     # TODO: implement an actual cli using argparse
@@ -32,18 +34,32 @@ def main() -> None:
 
     username = args[0]
     dbname = f"{username}_twitter_archive.sqlite"
+    dbexists = Path(dbname).exists()
     sqla_engine = tweetarchiver.sqla.create_engine(f"sqlite:///{dbname}", echo=False)
     tweetarchiver.DeclarativeBase.metadata.create_all(sqla_engine)
     Session = sessionmaker(bind=sqla_engine)
     LOGGER.info("Creating new db session")
     session = Session()
 
+    oldest = 0
+    newest = 0
+    scrape_parameters = []
+    if dbexists:
+        # do not download tweets that already are in db
+        newest = tweetarchiver.Tweet.newest_tweet(session)
+        oldest = tweetarchiver.Tweet.oldest_tweet(session)
+        scrape_parameters.append({"max_id":oldest, "min_id":0}) # only older
+        scrape_parameters.append({"max_id":0, "min_id":newest}) # only newer
+    else:
+        scrape_parameters = [{"max_id":0, "min_id":0}]
+
     try:
-        for new_tweets in tweetarchiver.scrape_tweets(username):
-            session.add_all(new_tweets)
-            session.commit()
+        for kwargs in scrape_parameters:
+            for new_tweets in tweetarchiver.scrape_tweets(username, **kwargs):
+                session.add_all(new_tweets)
+                session.commit()
     except:
-        LOGGER.info("Uncaught exception, rolling back db session")
+        LOGGER.exception("Uncaught exception, rolling back db session")
         session.rollback()
         raise
     finally:
@@ -55,5 +71,5 @@ if __name__ == "__main__":
     try:
         main()
     except:
-        LOGGER.exception("UNEXPECTED ERROR")
+        LOGGER.exception("UNCAUGT EXCEPTION")
         raise
