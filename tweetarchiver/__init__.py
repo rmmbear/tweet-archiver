@@ -3,6 +3,7 @@ from calendar import timegm
 import json
 import logging
 from hashlib import md5
+from urllib.parse import urlparse
 from typing import Generator, BinaryIO, Optional, List, Tuple, Union
 
 import requests
@@ -25,7 +26,7 @@ FH = logging.FileHandler("lastrun.log", mode="w")
 FH.setLevel(logging.DEBUG)
 FH.setFormatter(LOG_FORMAT_FILE)
 TH = logging.StreamHandler()
-TH.setLevel(logging.DEBUG)
+TH.setLevel(logging.INFO)
 TH.setFormatter(LOG_FORMAT_TERM)
 
 LOGGER.addHandler(TH)
@@ -125,7 +126,7 @@ def download(link: str,
 
         retry_count += 1
         delay = exp_delay[retry_count-1]
-        print(f" Retrying({retry_count}/{max_retries}) in {delay}s")
+        print(f"Retrying({retry_count}/{max_retries}) in {delay}s")
         time.sleep(delay)
 
     print("COULD NOT COMPLETE DOWNLOAD")
@@ -139,6 +140,7 @@ class TweetHTML(DeclarativeBase):
     tweet_id = sqla.Column(sqla.Integer, primary_key=True, nullable=False)
     html = sqla.Column(sqla.String, nullable=False)
     scraped_on = sqla.Column(sqla.Integer, nullable=False)
+
 
     def parse(self) -> "Tweet":
         return Tweet(BeautifulSoup(self.html, HTML_PARSER).select(".js-stream-tweet")[0])
@@ -172,11 +174,11 @@ class TweetHTML(DeclarativeBase):
 
 class Attachment(DeclarativeBase):
     __tablename__ = "account_attachments"
-    id = sqla.Column(sqla.Integer, primary_key=True)
     url = sqla.Column(sqla.String, nullable=False, primary_key=True)
     tweet_id = sqla.Column(sqla.Integer, sqla.ForeignKey("account_archive.tweet_id"), nullable=False)
-    position = sqla.Column(sqla.Integer, nullable=False)
+    position = sqla.Column(sqla.Integer, nullable=False) # to retain order in which images are displayed
     sensitive = sqla.Column(sqla.Boolean, nullable=False)
+
     type = sqla.Column(sqla.String, nullable=True)
     size = sqla.Column(sqla.Integer, nullable=True)
     hash = sqla.Column(sqla.String, nullable=True)
@@ -189,13 +191,16 @@ class Attachment(DeclarativeBase):
         tweet_id = int(tweet_html.get("data-tweet-id").strip())
         video_elements = tweet_html.select(".js-stream-tweet .is-video")
         image_elements = tweet_html.select(".js-stream-tweet .AdaptiveMedia-photoContainer img")
-        tombstone_label = tweet_html.select("AdaptiveMediaOuterContainer .Tombstone-label").text
-        sensitive = "media may contain sensitive material" in tombstone_label
+        tombstone_label = tweet_html.select_one("AdaptiveMediaOuterContainer .Tombstone-label")
+        sensitive = False
+        if tombstone_label:
+            tombstone_label = tombstone_label.text
+            sensitive = "media may contain sensitive material" in tombstone_label
 
         media = []
         for num, image in enumerate(image_elements):
             image_url = image.get("src").strip()
-            #setattr(self, f"image_{num+1}_url", image_url)
+            #TODO: detect apngs
             media.append(
                 cls(
                     url=image_url,
@@ -206,37 +211,48 @@ class Attachment(DeclarativeBase):
                     )
                 )
         if video_elements:
-            vid_url = tweet_html.select(".PlayableMedia-player")[0].get("style").split(";") # maybe use regex
-            # 'gifs' (actually short mp4s) can be downloaded directly
-            # for actual vids m3u fuckery is needed
-            # relevant snippet of the gif being embedded
-            """
-            <div class="AdaptiveMediaOuterContainer">
-            <div class="AdaptiveMedia is-video has-autoplayable-media">
-            <div class="AdaptiveMedia-container">
-            <div class="AdaptiveMedia-video">
-            <div class="AdaptiveMedia-videoContainer">
-            <div class="PlayableMedia PlayableMedia--gif">
-            <div class="PlayableMedia-container">
-            <div class="PlayableMedia-player" data-border-bottom-left-radius="" data-border-bottom-right-radius="" data-border-top-left-radius="" data-border-top-right-radius="" data-playable-media-url="" data-use-b-version-of-react-player="" data-use-player-precache="" data-use-react-player="" style="padding-bottom: 100.0%; background-image:url('https://pbs.twimg.com/tweet_video_thumb/DYhrrxGV4AU5_-9.jpg')">
-            """
+            gif = tweet_html.select_one(".PlayableMedia--gif")
+            if gif:
+                video_type = "vid:gif"
+                # 'gifs' (actually short mp4s) can be downloaded directly, for actual vids m3u fuckery is needed
+                # note that in web twitter the furthest descendant of .PlayableMedia-player
+                # would be a video tag containing the direct url to the video
+                # but because of the approach for accessing twitter, we do not have accesss to that
+                # video tag als ocontains url to a 'poster' displayed while the video is not playing
+                # image is hosted at https://pbs.twimg.com/tweet_video_thumb/{file}
+                # and the video at https://video.twimg.com/tweet_video/{file}
+                # the poster image and video file always use the same name, so if we know that the
+                # image is named EOFhYRnWkAIlIK8.jpg then the url for our video is
+                # becomes https://video.twimg.com/tweet_video/EOFhYRnWkAIlIK8.mp4
+                # as it happens, the .PlayableMedia-player element contains a style attribute, which
+                # includes a background image - this is the exact same file as in the video tag
+                # this means we can:
+                # 1 grab .PlayableMedia-playerelement
+                # 2 get its style attribute
+                # 3 parse it and get the image url
+                # 4 place the filename in video url templat
+                # and we have the url to the video
+                player_style = tweet_html.select_one(".PlayableMedia-player").get("style")
+                player_style = dict([x.strip().split(":", maxsplit=1) for x in player_style.split(";")])
+                assert player_style["background-image"].startswith("url")
+
+                image_url = player_style["background-image"][5:-2:]
+                image_url = urlparse(image_url)
+                # take path -> split on elements, take the last one -> split on extension, take name
+                video_name = image_url.path.rsplit("/", maxsplit=1)[-1].rsplit(".", maxsplit=1)[0]
+                vid_url = f"https://video.twimg.com/tweet_video/{video_name}.mp4"
+
+            else:
+                video_type = "vid:mp4"
+                vid_url = f"https://twitter.com/user/status/{tweet_id}"
+
             video = cls(
-                #url=f"https://twitter.com/user/status/{tweet_id}",
+                url=vid_url,
                 tweet_id=tweet_id,
                 position=1,
-                sensitive=sensitive)
+                sensitive=sensitive,
+                type=video_type)
             media.append(video)
-
-        try:
-            assert len(image_elements) <= 4
-            assert len(video_elements) <= 1
-            assert True if not video_elements else len(image_elements) == 0
-        except AssertionError:
-            LOGGER.debug("id=%s", tweet_id)
-            LOGGER.debug("images=%s", image_elements)
-            LOGGER.debug("videos=%s", video_elements)
-            LOGGER.debug("html=%s", tweet_html)
-            raise
 
         return media
 
@@ -273,9 +289,6 @@ class Tweet(DeclarativeBase):
 
     tags = sqla.Column(sqla.JSON, nullable=True)#includes info on type of tags and their positions in tweet
     poll_data = sqla.Column(sqla.JSON, nullable=True)#
-    # total_votes = int
-    # choices = [{prompt=str, percentage=int, }]
-    #
     poll_finished = sqla.Column(sqla.Boolean, nullable=True)
 
     has_video = sqla.Column(sqla.Boolean, nullable=False)
@@ -322,6 +335,7 @@ class Tweet(DeclarativeBase):
         #    LOGGER.debug("Using last link in post as an embed link in tweet %s", self.tweet_id)
         #    self.embedded_link = self.links[-1]
 
+
     def _get_tweet_text(self, tweet_html: BeautifulSoup) -> Optional[str]:
         text_container = tweet_html.select_one(".js-tweet-text")
         text_container_str = str(text_container)
@@ -365,7 +379,6 @@ class Tweet(DeclarativeBase):
     def _untangle_link(self, element: BeautifulSoup) -> str:
         """
         """
-        #hashtags
         if "twitter-atreply" in element.attrs["class"]:
             element_text = element.text
         elif "twitter-hashtag" in element.attrs["class"]:
@@ -377,14 +390,22 @@ class Tweet(DeclarativeBase):
                 element_text = element.get("data-expanded-url")
                 self.links.append(element_text)
                 if "u-hidden" in element.attrs["class"]:
-                    # link is displayed as a twitter card only, do not add it to text
-                    LOGGER.debug("card link = %s", self.embedded_link)
-                    LOGGER.debug("hidden link = %s", element_text)
+                    # FIXME: decide what to do with withheld qrt links
+                    # example: https://twitter.com/FakeUnicode/status/686654542574825473
                     if self.embedded_link:
-                        assert element_text == self.embedded_link
-                    else:
-                        # this happens for youtube links
+                        LOGGER.debug("card link = %s", self.embedded_link)
+                        LOGGER.debug("hidden link = %s", element_text)
+                        try:
+                            assert element_text == self.embedded_link
+                        except AssertionError as err:
+                            #account for unnecessary trailing slash in originally embedded link vs redirected link
+                            if not element_text.rstrip("/") == self.embedded_link.rstrip("/"):
+                                raise err
+                    elif not self.qrt_id:
+                        LOGGER.warning("USING HIDDEN TIMELINE LINK AS EMBED LINK, TWEET:%s , LINK:%s", self.tweet_id, element_text)
                         self.embedded_link = element_text
+                    # else: this is a quote RT, embed link not needed
+                    # V link is displayed as a twitter card only, do not add it to text
                     element_text = ""
             elif "data-pre-embedded" in element.attrs and element.attrs["data-pre-embedded"] == "true":
                 # pic.twitter.com links, i.e. link to the embedded attachments
@@ -398,7 +419,6 @@ class Tweet(DeclarativeBase):
             LOGGER.error("LINK WAS NOT MATCHED IN ID %s", self.tweet_id)
             LOGGER.error("%s", element)
             raise RuntimeError()
-
 
         return element_text
 
@@ -417,7 +437,6 @@ class Tweet(DeclarativeBase):
             return None
 
         frame_container = card_container.select_one("div")
-        #LOGGER.debug(frame_container)
         frame_url = frame_container.get("data-src")
         frame_url = f"https://twitter.com{frame_url}"
 
@@ -425,19 +444,17 @@ class Tweet(DeclarativeBase):
         # authorization in form of referer header is required, otherwise 403 is returned
         frame = download(frame_url, headers={"Referer":f"https://twitter.com/user/status/{self.tweet_id}"})
         frame = BeautifulSoup(frame, HTML_PARSER)
-        #LOGGER.debug(frame)
+
         embedded_link = frame.select_one(".TwitterCard .TwitterCard-container").get("href")
         if not embedded_link:
-            if card_name == "player":
-                LOGGER.debug("Expected failure - did not find embedded link for 'player' card in tweet %s", self.tweet_id)
-                return None
-
+            embedded_link = frame.select_one("a.js-openLink").get("href")
+        if not embedded_link:
             LOGGER.error("Could not find embedded link for card '%s' in tweet %s", card_name, self.tweet_id)
             raise RuntimeError()
 
         if embedded_link.startswith("http:"):
-            embedded_link = f"{'https'}{embedded_link[4:]}"
             # avoid unnecessary redirects for links generated before t.co started fully encrypting traffic
+            embedded_link = f"{'https'}{embedded_link[4:]}"
 
         link_query = download(embedded_link, method="HEAD", return_response=True, allow_redirects=False)
         if link_query.is_redirect:
@@ -475,10 +492,11 @@ class Tweet(DeclarativeBase):
 
         poll_object["choice_count"] = card_serialized["choice_count"]
         poll_object["end_time"] = timegm(time.strptime(card_serialized["end_time"], "%Y-%m-%dT%H:%M:%S%z"))
-        # ^ store time as unix timestamp for consistency
+        # store time as unix timestamp for consistency ^
 
         poll_container = poll_frame.select_one(".TwitterCard .CardContent .PollXChoice")
-        poll_object["votes_total"] = poll_container.get("data-poll-init-state")
+        poll_object["votes_total"] = int(poll_container.select_one("span.PollXChoice-footer--total").text.strip().split(" ", maxsplit=1)[0])
+        #FIXME: ^ this is long and stupid
         poll_object["winning_index"] = poll_container.get("data-poll-vote-majority")
         #poll_object["voted_for_index"] = poll_container.get("data-poll-user-choice")
         poll_choices = poll_container.select(".PollXChoice-choice .PollXChoice-choice--text")
@@ -493,10 +511,8 @@ class Tweet(DeclarativeBase):
             poll_object["choices"].append(choice)
 
         assert len(poll_object["choices"]) == poll_object["choice_count"]
-        #LOGGER.debug("%s", poll_object)
-        #LOGGER.debug("%s", card_serialized)
+        assert poll_object["votes_total"] == sum([choice["votes"] for choice in poll_object["choices"]])
         return poll_object, poll_object["is_open"]
-
 
 
     @classmethod
@@ -517,17 +533,6 @@ class Tweet(DeclarativeBase):
             return int(tid)
         except sql_exc.NoResultFound:
             return 0
-
-
-def scrape_video() -> None:
-    """Return list of video rows
-    """
-    ...
-
-def scrape_images() -> None:
-    """Return list of image rows
-    """
-    ...
 
 
 def scrape_tweets(username: str, min_id: int = 0, max_id: int = 0,
@@ -568,7 +573,7 @@ def scrape_tweets(username: str, min_id: int = 0, max_id: int = 0,
         if max_id:
             query_url = f"{query_url} max_id:{max_id}"
 
-        print("Scraping page", page_number, ":", query_url)
+        print("Scraping page", page_number, ":",  query_url)
         # rate limit to 1 request per page_delay seconds
         time.sleep(max(0, loop_start + page_delay - time.time()))
         results_page = download(query_url)
@@ -582,6 +587,10 @@ def scrape_tweets(username: str, min_id: int = 0, max_id: int = 0,
             # but containing no actual content apart from suspension notice.
             # When encountered, scraping must be stopped immediately
             # TODO: detect suspended accounts
+            # found an example tweet while testing scraper on FakeUnicode
+            # tweet from user CarlyFiorina, ID: 600475491384995840
+            # referenced in https://twitter.com/FakeUnicode/status/686654542574825473
+            # search query: " https://twitter.com/search?f=tweets&vertical=default&q=from:CarlyFiorina max_id:600475491384995841 "
             max_id = tweet_html.get("data-tweet-id").strip()
             new_tweets.append(tweet_html)
             tweets_found += 1

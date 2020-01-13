@@ -37,7 +37,7 @@ LOGGER = tweetarchiver.LOGGER
 def update_tweets(username: str, session: Session) -> int:
     newest_id = tweetarchiver.TweetHTML.newest_tweet(session)
     oldest_id = tweetarchiver.TweetHTML.oldest_tweet(session)
-    image_rows = 0
+    attachment_rows = 0
     tweet_rows = 0
     start_time = time.time()
     options = []
@@ -52,12 +52,25 @@ def update_tweets(username: str, session: Session) -> int:
     for kwargs in options:
         for html_page in tweetarchiver.scrape_tweets(username, **kwargs):
             timestamp = int(time.time())
-            tweets_html = [tweetarchiver.TweetHTML(tweet, timestamp) for tweet in html_page]
+            attachments = []
+            tweets_html = []
+            tweets_parsed = []
+
+            for html in html_page:
+                tweets_html.append(tweetarchiver.TweetHTML(html, timestamp))
+                tweet_parsed = tweetarchiver.Tweet(html)
+                if tweet_parsed.has_video or tweet_parsed.image_count:
+                    attachments.extend(tweetarchiver.Attachment.from_html(html))
+
+                tweets_parsed.append(tweet_parsed)
+
             session.add_all(tweets_html)
-            parsed_tweets = [tweetarchiver.Tweet(tweet) for tweet in html_page]
-            session.add_all(parsed_tweets)
+            session.add_all(tweets_parsed)
+            session.add_all(attachments)
+
             session.commit()
-            tweet_rows += len(parsed_tweets)
+            tweet_rows += len(tweets_parsed)
+            attachment_rows += len(attachments)
 
     time_spent_s = (time.time() - start_time)
     time_spent_m = time_spent_s // 60
@@ -66,9 +79,9 @@ def update_tweets(username: str, session: Session) -> int:
     time_spent_m = time_spent_m % 60
     time_str = f"{time_spent_h:.0f}h {time_spent_m:.0f}m {time_spent_s:.0f}s"
     LOGGER.info("Inserted %s new tweet rows", tweet_rows)
-    LOGGER.info("Inserted %s new image rows", image_rows)
+    LOGGER.info("Inserted %s new attachment rows", attachment_rows)
     LOGGER.info("This took %s", time_str)
-    return image_rows + tweet_rows
+    return attachment_rows + tweet_rows
 
 
 def update_media(session: Session) -> int:
