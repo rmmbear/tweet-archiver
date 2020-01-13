@@ -287,9 +287,8 @@ class Tweet(DeclarativeBase):
     replying_to = sqla.Column(sqla.Integer, nullable=True)
     qrt_id = sqla.Column(sqla.Integer, nullable=True)
 
-    tags = sqla.Column(sqla.JSON, nullable=True)#includes info on type of tags and their positions in tweet
-    poll_data = sqla.Column(sqla.JSON, nullable=True)#
-    poll_finished = sqla.Column(sqla.Boolean, nullable=True)
+    poll_data = sqla.Column(sqla.JSON, nullable=True)
+    poll_finished = sqla.Column(sqla.Boolean, nullable=True) # if false, will need to be updated
 
     has_video = sqla.Column(sqla.Boolean, nullable=False)
     image_count = sqla.Column(sqla.Integer, nullable=False)
@@ -313,7 +312,6 @@ class Tweet(DeclarativeBase):
         qrt = tweet_html.select_one(".QuoteTweet-innerContainer")
         self.qrt_id = qrt.get("data-item-id").strip() if qrt else None
 
-        self.tags = None
         poll_data, poll_finished = self._get_poll_data(tweet_html)
         self.poll_data = poll_data
         self.poll_finished = poll_finished
@@ -495,23 +493,23 @@ class Tweet(DeclarativeBase):
         # store time as unix timestamp for consistency ^
 
         poll_container = poll_frame.select_one(".TwitterCard .CardContent .PollXChoice")
-        poll_object["votes_total"] = int(poll_container.select_one("span.PollXChoice-footer--total").text.strip().split(" ", maxsplit=1)[0])
-        #FIXME: ^ this is long and stupid
+
         poll_object["winning_index"] = poll_container.get("data-poll-vote-majority")
         #poll_object["voted_for_index"] = poll_container.get("data-poll-user-choice")
         poll_choices = poll_container.select(".PollXChoice-choice .PollXChoice-choice--text")
 
+        poll_object["votes_total"] = 0
         poll_object["choices"] = []
         for choice_num in range(poll_object["choice_count"]):
             choice_html = poll_choices[choice_num]
             choice = dict()
-            choice["votes"] = card_serialized[f"count{choice_num+1}"]
+            choice["votes"] = int(card_serialized[f"count{choice_num+1}"])
             choice["votes_percent"] = choice_html.select_one(".PollXChoice-progress").text
             choice["label"] = choice_html.select_one("span:nth-of-type(2)").text
             poll_object["choices"].append(choice)
+            poll_object["votes_total"] += choice["votes"]
 
         assert len(poll_object["choices"]) == poll_object["choice_count"]
-        assert poll_object["votes_total"] == sum([choice["votes"] for choice in poll_object["choices"]])
         return poll_object, poll_object["is_open"]
 
 
@@ -573,7 +571,7 @@ def scrape_tweets(username: str, min_id: int = 0, max_id: int = 0,
         if max_id:
             query_url = f"{query_url} max_id:{max_id}"
 
-        print("Scraping page", page_number, ":",  query_url)
+        print("Scraping page", page_number, ":", query_url)
         # rate limit to 1 request per page_delay seconds
         time.sleep(max(0, loop_start + page_delay - time.time()))
         results_page = download(query_url)
