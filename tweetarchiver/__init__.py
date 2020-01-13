@@ -84,10 +84,11 @@ def download(link: str,
     If to_file is not None, write response to it and return its md5 hash.
     """
     #TODO: consider splitting this function - one returning response objects, the other strings
-    exp_delay = [2**x for x in range(max_retries)]
+    exp_delay = [2**(x+1) for x in range(max_retries)]
     retry_count = 0
     query = requests.Request(method, link)
     query = TWITTER_SESSION.prepare_request(query)
+    LOGGER.debug("Making request to %s", link)
     if headers:
         query.headers.update(headers)
     while True:
@@ -191,7 +192,7 @@ class Attachment(DeclarativeBase):
         tweet_id = int(tweet_html.get("data-tweet-id").strip())
         video_elements = tweet_html.select(".js-stream-tweet .is-video")
         image_elements = tweet_html.select(".js-stream-tweet .AdaptiveMedia-photoContainer img")
-        tombstone_label = tweet_html.select_one("AdaptiveMediaOuterContainer .Tombstone-label")
+        tombstone_label = tweet_html.select_one(".AdaptiveMediaOuterContainer .Tombstone-label")
         sensitive = False
         if tombstone_label:
             tombstone_label = tombstone_label.text
@@ -325,7 +326,7 @@ class Tweet(DeclarativeBase):
         self.retweets = int(retweets)
         self.replies = int(replies)
 
-        self.links = []
+        self.links: List[str] = []
         self.embedded_link = self._get_embedded_link(tweet_html)
         self.text = self._get_tweet_text(tweet_html)
 
@@ -450,14 +451,16 @@ class Tweet(DeclarativeBase):
             LOGGER.error("Could not find embedded link for card '%s' in tweet %s", card_name, self.tweet_id)
             raise RuntimeError()
 
-        if embedded_link.startswith("http:"):
-            # avoid unnecessary redirects for links generated before t.co started fully encrypting traffic
-            embedded_link = f"{'https'}{embedded_link[4:]}"
+        if embedded_link.startswith("https://t.co") or embedded_link.startswith("http://t.co"):
+            if embedded_link.startswith("http:"):
+                # avoid unnecessary redirects for links generated before t.co started fully encrypting traffic
+                embedded_link = f"{'https'}{embedded_link[4:]}"
+            #FIXME: handle http errors
+            link_query = download(embedded_link, method="HEAD", return_response=True, allow_redirects=False)
+            if link_query.is_redirect:
+                LOGGER.debug("Detected redirect from '%s' to '%s'", embedded_link, link_query.headers["location"])
+                embedded_link = link_query.headers["location"]
 
-        link_query = download(embedded_link, method="HEAD", return_response=True, allow_redirects=False)
-        if link_query.is_redirect:
-            LOGGER.debug("Detected redirect from '%s' to '%s'", embedded_link, link_query.headers["location"])
-            embedded_link = link_query.headers["location"]
         LOGGER.debug("Card type: %s, Card link: %s", card_name, embedded_link)
         return embedded_link
 
