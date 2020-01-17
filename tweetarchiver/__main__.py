@@ -109,7 +109,7 @@ def update_media(session: Session, archive_dir: Path) -> int:
     pending_attachments = tweetarchiver.Attachment.with_missing_files(session)
     for attachment in pending_attachments:
         if attachment.type == "vid:mp4":
-            LOGGER.warning("VIDEO DOWNLOAD CURRENTLY NOT IMPLEMENTED, SKIPPING")
+            LOGGER.warning("VIDEO DOWNLOAD NOT YET IMPLEMENTED, SKIPPING")
             continue
 
         filename = attachment.url.rsplit("/", maxsplit=1)[-1]
@@ -121,8 +121,11 @@ def update_media(session: Session, archive_dir: Path) -> int:
 
         with temp_download.open(mode="wb") as download_destination:
             md5sum = tweetarchiver.download(url, to_file=download_destination)
-
+            #FIXME: handle https errors
         downloaded_file_size = temp_download.stat().st_size
+        if not downloaded_file_size:
+            LOGGER.error("DOWNLOAD FAILED FOR URL:%s", attachment.url)
+            continue
 
         matching_hash_query = session.query(tweetarchiver.Attachment).filter(tweetarchiver.Attachment.hash == md5sum)
         known_file = matching_hash_query.first()
@@ -213,4 +216,3 @@ if __name__ == "__main__":
     # TODO: use account id instead of displayname for identifying accounts
     # TODO: account for possible changes of handle/displayname
     # TODO: save conversation context
-    # TODO: save archive to ~/tweetarchiver

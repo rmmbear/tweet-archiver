@@ -54,7 +54,7 @@ TWITTER_SESSION.headers["x-twitter-client-language"] = "en"
 
 def set_guest_token() -> None:
     """Set the authorization and guest token in twitter
-    session's headers. This is only necessary for videos and polls, all
+    session's headers. This is only necessary for videos, all
     other parts of the site can be accessed without any authorization.
     """
     TWITTER_SESSION.headers["Authorization"] = "Bearer AAAAAAAAAAAAAAAAAAAAAPYXBAAAAAAACLXUNDekMxqa8h%2F40K4moUkGsoc%3DTYfbDKbT3jJPCEVnMYqilB28NHfOPqkca3qaAxGfsyKCs0wRbw"
@@ -80,15 +80,16 @@ def download(link: str,
              allow_redirects: bool = True,
              max_retries: int = 3) -> Union[str, requests.Response]:
     """
-
     If to_file is not None, write response to it and return its md5 hash.
     """
+    assert not (return_response and to_file)
+    #FIXME: ^ do actual error checking here
     #TODO: consider splitting this function - one returning response objects, the other strings
     exp_delay = [2**(x+1) for x in range(max_retries)]
     retry_count = 0
     query = requests.Request(method, link)
     query = TWITTER_SESSION.prepare_request(query)
-    LOGGER.debug("Making request to %s", link)
+    LOGGER.debug("Making %s request to %s", method, link)
     if headers:
         query.headers.update(headers)
     while True:
@@ -131,6 +132,9 @@ def download(link: str,
         time.sleep(delay)
 
     print("COULD NOT COMPLETE DOWNLOAD")
+    if return_response:
+        return response
+
     return ""
 
 
@@ -175,15 +179,18 @@ class TweetHTML(DeclarativeBase):
 
 class Attachment(DeclarativeBase):
     __tablename__ = "account_attachments"
-    url = sqla.Column(sqla.String, nullable=False, primary_key=True)
+    id = sqla.Column(sqla.Integer, primary_key=True)
+    url = sqla.Column(sqla.String, nullable=False)
+    # while this is not the case 90% of the time, urls can repeat
     tweet_id = sqla.Column(sqla.Integer, sqla.ForeignKey("account_archive.tweet_id"), nullable=False)
     position = sqla.Column(sqla.Integer, nullable=False) # to retain order in which images are displayed
     sensitive = sqla.Column(sqla.Boolean, nullable=False)
 
-    type = sqla.Column(sqla.String, nullable=True)
+    type = sqla.Column(sqla.String, nullable=False)
     size = sqla.Column(sqla.Integer, nullable=True)
     hash = sqla.Column(sqla.String, nullable=True)
     path = sqla.Column(sqla.String, nullable=True)
+
 
     #attached = relationship(Tweet, back_populates="media")
 
@@ -223,15 +230,15 @@ class Attachment(DeclarativeBase):
                 # image is hosted at https://pbs.twimg.com/tweet_video_thumb/{file}
                 # and the video at https://video.twimg.com/tweet_video/{file}
                 # the poster image and video file always use the same name, so if we know that the
-                # image is named EOFhYRnWkAIlIK8.jpg then the url for our video is
-                # becomes https://video.twimg.com/tweet_video/EOFhYRnWkAIlIK8.mp4
+                # image is named EOFhYRnWkAIlIK8.jpg then the url for our video
+                # is https://video.twimg.com/tweet_video/EOFhYRnWkAIlIK8.mp4
                 # as it happens, the .PlayableMedia-player element contains a style attribute, which
                 # includes a background image - this is the exact same file as in the video tag
                 # this means we can:
                 # 1 grab .PlayableMedia-playerelement
                 # 2 get its style attribute
                 # 3 parse it and get the image url
-                # 4 place the filename in video url templat
+                # 4 place the filename in video url template
                 # and we have the url to the video
                 player_style = tweet_html.select_one(".PlayableMedia-player").get("style")
                 player_style = dict([x.strip().split(":", maxsplit=1) for x in player_style.split(";")])
@@ -256,6 +263,12 @@ class Attachment(DeclarativeBase):
             media.append(video)
 
         return media
+
+
+    @classmethod
+    def with_missing_files(cls, session: Session) -> List["Attachment"]:
+        attachments_missing_files = session.query(cls).filter(cls.path == None).order_by(cls.tweet_id)
+        return attachments_missing_files.all()
 
 
 class Account(DeclarativeBase):
@@ -299,7 +312,11 @@ class Tweet(DeclarativeBase):
 
     embedded_link = sqla.Column(sqla.String, nullable=True)
     text = sqla.Column(sqla.String, nullable=True)
-
+    poi = sqla.Column(sqla.String, nullable=True) # format is "{label}:{place_id}"
+    # author can choose to include label location to the tweet when composing it
+    # this is different from the location added automatically to tweets if location data is enabled
+    # I'm deciding to keep this only because it has to be included manually at which point it becomes
+    #                                            content
     media = relationship(Attachment, order_by=Attachment.position)
 
 
@@ -348,8 +365,16 @@ class Tweet(DeclarativeBase):
                     element_text = chr(int(element.get('data-original-codepoint')[2:], 16))
                 elif "twitter-hashflag-container" in element.attrs["class"]:
                     # this is for promotional hashtags with special "emojis" (they're not actually emojis)
-                    a = element.find("a")
+                    a = element.select_one("a")
                     element_text = a.text if a else ""
+                elif "tweet-poi-geo-text" in element.attrs["class"]:
+                    a = element.select_one("a")
+                    poi_label = a.text
+                    poi_id = a.get("data-place-id")
+                    LOGGER.debug("encountered poi location data:%s, id:%s, tweet_id:%s",
+                                   poi_label, poi_id, self.tweet_id)
+                    self.poi = f"{poi_label}:{poi_id}"
+                    element_text = ""
                 else:
                     print(f"ID={self.tweet_id} SPAN NOT MATCHED")
                     LOGGER.error("SPAN WAS NOT MATCHED IN ID %s", self.tweet_id)
@@ -402,6 +427,7 @@ class Tweet(DeclarativeBase):
                                 raise err
                     elif not self.qrt_id:
                         LOGGER.warning("USING HIDDEN TIMELINE LINK AS EMBED LINK, TWEET:%s , LINK:%s", self.tweet_id, element_text)
+                        # TODO: do not warn for vine and qrt links
                         self.embedded_link = element_text
                     # else: this is a quote RT, embed link not needed
                     # V link is displayed as a twitter card only, do not add it to text
@@ -423,9 +449,6 @@ class Tweet(DeclarativeBase):
 
 
     def _get_embedded_link(self, tweet_html: BeautifulSoup) -> Optional[str]:
-        #FIXME: youtube links in older tweets (from 2014 and before) are not picked up
-        # they are technically shown as embeds on web twitter, but they're not
-        # included as timeline links in the tweet
         card_container = tweet_html.select_one(".card2.js-media-container")
         if not card_container:
             return None
@@ -451,6 +474,7 @@ class Tweet(DeclarativeBase):
             LOGGER.error("Could not find embedded link for card '%s' in tweet %s", card_name, self.tweet_id)
             raise RuntimeError()
 
+        # not all embedded links are shortened - this is rare but happens for some old tweets
         if embedded_link.startswith("https://t.co") or embedded_link.startswith("http://t.co"):
             if embedded_link.startswith("http:"):
                 # avoid unnecessary redirects for links generated before t.co started fully encrypting traffic
@@ -592,6 +616,7 @@ def scrape_tweets(username: str, min_id: int = 0, max_id: int = 0,
             # tweet from user CarlyFiorina, ID: 600475491384995840
             # referenced in https://twitter.com/FakeUnicode/status/686654542574825473
             # search query: " https://twitter.com/search?f=tweets&vertical=default&q=from:CarlyFiorina max_id:600475491384995841 "
+            # IMPORTANT: QRTs quoting suspended accounts cannot be saved (they do not show up in search results)
             max_id = tweet_html.get("data-tweet-id").strip()
             new_tweets.append(tweet_html)
             tweets_found += 1
