@@ -116,6 +116,7 @@ def update_media(session: Session, archive_dir: Path) -> int:
         temp_download = tmpdir / filename
         if attachment.type.startswith("img"):
             url = f"{attachment.url}:orig"
+            #FIXME: not all images have an ':orig version',
         else:
             url = attachment.url
 

@@ -419,15 +419,11 @@ class Tweet(DeclarativeBase):
                     if self.embedded_link:
                         LOGGER.debug("card link = %s", self.embedded_link)
                         LOGGER.debug("hidden link = %s", element_text)
-                        try:
-                            assert element_text == self.embedded_link
-                        except AssertionError as err:
-                            #account for unnecessary trailing slash in originally embedded link vs redirected link
-                            if not element_text.rstrip("/") == self.embedded_link.rstrip("/"):
-                                raise err
+                        assert urlparse(self.embedded_link.rstrip("/")) == urlparse(element_text.rstrip("/"))
+
                     elif not self.qrt_id:
+                        #TODO: do not warn for vine and qrt links
                         LOGGER.warning("USING HIDDEN TIMELINE LINK AS EMBED LINK, TWEET:%s , LINK:%s", self.tweet_id, element_text)
-                        # TODO: do not warn for vine and qrt links
                         self.embedded_link = element_text
                     # else: this is a quote RT, embed link not needed
                     # V link is displayed as a twitter card only, do not add it to text
@@ -623,14 +619,20 @@ def scrape_tweets(username: str, min_id: int = 0, max_id: int = 0,
 
         yield new_tweets
 
+        if not max_id:
+            print("End reached, breaking")
+            break
+
+        assert len(new_tweets) == 20
+
         page_number += 1
         if page_limit and page_number > page_limit:
             print(f"Page limit reached ({page_number})")
             break
 
-        if not max_id:
-            print("End reached, breaking")
-            break
+
+
+
 
         # do not include last seen tweet in next search
         max_id = int(max_id) - 1
