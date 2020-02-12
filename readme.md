@@ -10,8 +10,7 @@ This is a proof of concept for a twitter profile archiver. It downloads all publ
 Clone this repository, ensure you have all required dependencies and from the project's root directory launch it as a module: `python3 -m tweetarchiver username`, where `username` is the account name whose tweets you wish to download.
 
 ## Interpreting output:
-Tweets are saved in sqlite database. Its structure is:
-table:"account_archive" with columns: tweet_id:string, thread_id:string, timestamp:integer, image_1_url:string, image_2_url:string, image_3_url:string, image_4_url:string, has_video:boolean, text:string
+Tweets are saved to sqlite database file and saved in `~/tweetarchiver/{username}/`, which is also where the attachments are saved. Thirdparty sqlite viewer/editor is currently needed to view archived tweets.
 
 ## Caveats:
 - This is almost certainly against Twitter's ToS (I'm circumventing the status lookup limit enforced by their API by using the web search)
@@ -21,7 +20,8 @@ table:"account_archive" with columns: tweet_id:string, thread_id:string, timesta
 
 ## TODOs:
 - ~~Use a sqlite database instead of csv~~ Done
-- Create local data nad live data parsing tests (live data to be tested before each run, to ensure parser is up-to-date)
-- After downloading all tweets, also download all the media
-- Download all tweets in given thread to keep conversation context
+- ~~Archive images~~ Done
+- Create local data and live data parsing tests (live data to be tested before each run, to ensure parser is up-to-date)
+- Scrape info from all twitter cards
 - Figure out how to archive videos (I could use youtube-dl here)
+- Download all tweets in given thread to keep conversation context
