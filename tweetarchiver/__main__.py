@@ -9,7 +9,7 @@ import requests
 from sqlalchemy.orm import sessionmaker, Session
 
 import tweetarchiver
-#from tweetarchiver.tests import test_live
+from tweetarchiver.tests import test_live
 
 WORKING_DIR = Path.home() / "tweetarchiver"
 WORKING_DIR.mkdir(exist_ok=True)
@@ -186,7 +186,7 @@ def update_media(db_session: Session, archive_dir: Path) -> int:
 
 def scraper_test() -> bool:
     print("Performing parser test on live data...", end="", flush=True)
-    #test_live.livetest()
+    test_live.livetest()
     print("Done!")
     return True
 
