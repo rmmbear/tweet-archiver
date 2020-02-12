@@ -139,9 +139,9 @@ def update_media(db_session: Session, archive_dir: Path) -> int:
                     if err.response.status_code == 404:
                         # continue down the suffix list
                         pass
-
-                    print(f"Could not complete download due to HTTP error: {str(err)}")
-                    raise
+                    else:
+                        print(f"Could not complete download due to HTTP error: {str(err)}")
+                        raise
                 except requests.RequestException as exc:
                     print(f"Could not complete download due to network error: {str(exc)}")
                     raise
