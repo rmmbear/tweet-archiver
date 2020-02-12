@@ -1,10 +1,10 @@
 import time
-from calendar import timegm
 import json
 import logging
 from hashlib import md5
+from calendar import timegm
 from urllib.parse import urlparse
-from typing import Generator, BinaryIO, Optional, List, Tuple, Union
+from typing import Generator, BinaryIO, Optional, List, Tuple, Union, NamedTuple
 
 import requests
 import sqlalchemy as sqla
@@ -18,19 +18,15 @@ DeclarativeBase = declarative_base()
 
 __VERSION__ = "0.1"
 
-LOG_FORMAT_FILE = logging.Formatter("[%(levelname)s] %(asctime)s: %(name)s.%(funcName)s() line:%(lineno)d %(message)s")
 LOG_FORMAT_TERM = logging.Formatter("[%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("tweetarchiver")
 LOGGER.setLevel(logging.DEBUG)
-FH = logging.FileHandler("lastrun.log", mode="w")
-FH.setLevel(logging.DEBUG)
-FH.setFormatter(LOG_FORMAT_FILE)
 TH = logging.StreamHandler()
 TH.setLevel(logging.INFO)
 TH.setFormatter(LOG_FORMAT_TERM)
 
 LOGGER.addHandler(TH)
-LOGGER.addHandler(FH)
+
 
 HTML_PARSER = "html.parser"
 USER_AGENT = "".join(
@@ -52,6 +48,9 @@ TWITTER_SESSION.headers["x-twitter-client-language"] = "en"
 #TWITTER_SESSION.headers["Connection"] = "keep-alive"
 
 
+#https://twitter.com/intent/user?user_id=XXX
+#
+
 def set_guest_token() -> None:
     """Set the authorization and guest token in twitter
     session's headers. This is only necessary for videos, all
@@ -59,7 +58,8 @@ def set_guest_token() -> None:
     """
     TWITTER_SESSION.headers["Authorization"] = "Bearer AAAAAAAAAAAAAAAAAAAAAPYXBAAAAAAACLXUNDekMxqa8h%2F40K4moUkGsoc%3DTYfbDKbT3jJPCEVnMYqilB28NHfOPqkca3qaAxGfsyKCs0wRbw"
     link = "https://api.twitter.com/1.1/guest/activate.json"
-    response_json = json.loads(download(link, method="POST"))
+    response_json = download(link, method="POST").response.text
+    response_json = json.loads(response_json)
     guest_token = None
     try:
         guest_token = response_json["guest_token"]
@@ -72,19 +72,25 @@ def set_guest_token() -> None:
     TWITTER_SESSION.headers["x-guest-token"] = guest_token
 
 
+class Response(NamedTuple):
+    """Convenient """
+    response: requests.Response
+    size: int = 0
+    hash: str = ""
+
+
 def download(link: str,
-             return_response: bool = False,
-             to_file: Optional[BinaryIO] = None,
              method: str = "GET",
+             to_file: Optional[BinaryIO] = None,
              headers: Optional[dict] = None,
              allow_redirects: bool = True,
-             max_retries: int = 3) -> Union[str, requests.Response]:
+             max_retries: int = 3) -> "Response":
     """
-    If to_file is not None, write response to it and return its md5 hash.
+    Return Response named tuple
+        Response.response - requests.Response object
+        Response.size     - size of downloaded file, 0 if to_file is None
+        Response.hash     - md5 hash of the downloaded file, empty string if to_file is None
     """
-    assert not (return_response and to_file)
-    #FIXME: ^ do actual error checking here
-    #TODO: consider splitting this function - one returning response objects, the other strings
     exp_delay = [2**(x+1) for x in range(max_retries)]
     retry_count = 0
     query = requests.Request(method, link)
@@ -96,25 +102,32 @@ def download(link: str,
         try:
             response = TWITTER_SESSION.send(query, allow_redirects=allow_redirects, stream=True, timeout=15)
             response.raise_for_status()
-            if return_response:
-                return response
 
             if to_file:
+                size = 0
                 md5_hash = md5()
                 for chunk in response.iter_content(chunk_size=(1024**2)*3):
                     to_file.write(chunk)
                     md5_hash.update(chunk)
-                return md5_hash.hexdigest()
+                    size += len(chunk)
 
-            return response.text
+                #LOGGER.info("left=%s right=%s", size, response.headers["content-length"])
+                assert size == int(response.headers["content-length"])
+                return Response(response=response, size=size, hash=md5_hash.hexdigest())
+
+            return Response(response)
         except requests.HTTPError:
             LOGGER.error("Received HTTP error code %s", response.status_code)
+            if response.status_code in [404] or retry_count >= max_retries:
+                raise
         except requests.Timeout:
             LOGGER.error("Connection timed out")
+            if retry_count >= max_retries:
+                raise
         except requests.ConnectionError:
             LOGGER.error("Could not establish a new connection")
             #most likely a client-side connection error, do not retry
-            retry_count = max_retries
+            raise
         except requests.RequestException as err:
             LOGGER.error("Unexpected request exception")
             LOGGER.error("request url = %s", query.url)
@@ -123,19 +136,11 @@ def download(link: str,
             LOGGER.error("request body = %s", query.body)
             raise err
 
-        if retry_count >= max_retries:
-            break
-
         retry_count += 1
         delay = exp_delay[retry_count-1]
-        print(f"Retrying({retry_count}/{max_retries}) in {delay}s")
+        print(f"Retrying ({retry_count}/{max_retries}) in {delay}s")
+        LOGGER.error("Retrying (%s/%s) in %ss", retry_count, max_retries, delay)
         time.sleep(delay)
-
-    print("COULD NOT COMPLETE DOWNLOAD")
-    if return_response:
-        return response
-
-    return ""
 
 
 class TweetHTML(DeclarativeBase):
@@ -148,7 +153,7 @@ class TweetHTML(DeclarativeBase):
 
 
     def parse(self) -> "Tweet":
-        return Tweet(BeautifulSoup(self.html, HTML_PARSER).select(".js-stream-tweet")[0])
+        return Tweet.from_html(BeautifulSoup(self.html, HTML_PARSER).select_one(".js-stream-tweet"))
 
 
     def __init__(self, tweet_html: BeautifulSoup, timestamp: int) -> None:
@@ -191,8 +196,7 @@ class Attachment(DeclarativeBase):
     hash = sqla.Column(sqla.String, nullable=True)
     path = sqla.Column(sqla.String, nullable=True)
 
-
-    #attached = relationship(Tweet, back_populates="media")
+    attached = relationship("Tweet", back_populates="media")
 
     @classmethod
     def from_html(cls, tweet_html: BeautifulSoup) -> List["Attachment"]:
@@ -317,39 +321,69 @@ class Tweet(DeclarativeBase):
     # this is different from the location added automatically to tweets if location data is enabled
     # I'm deciding to keep this only because it has to be included manually at which point it becomes
     #                                            content
+    withheld_in = sqla.Column(sqla.String, nullable=True)
+    # two types of values possible: "unknown" if tweet is withheld but where exactly is not known
+    # otherwise two letter country identifiers (ISO 3166-1 alpha-2) separated with commas
+
     media = relationship(Attachment, order_by=Attachment.position)
 
+    @classmethod
+    def from_html(cls, tweet_html: BeautifulSoup) -> "Tweet":
+        new_tweet = cls()
+        new_tweet.tweet_id = int(tweet_html.get("data-tweet-id").strip())
+        new_tweet.thread_id = int(tweet_html.get("data-conversation-id").strip())
+        new_tweet.account_id = int(tweet_html.get("data-user-id").strip())
 
-    def __init__(self, tweet_html: BeautifulSoup) -> None:
-        self.tweet_id = int(tweet_html.get("data-tweet-id").strip())
-        self.thread_id = int(tweet_html.get("data-conversation-id").strip())
-        self.timestamp = int(tweet_html.select_one(".js-short-timestamp").get("data-time").strip())
-        self.account_id = int(tweet_html.get("data-user-id").strip())
+        withheld = tweet_html.select_one(".StreamItemContent--withheld")
 
-        self.replying_to = None # need a second pass on specific threads to get reply chains
+        if withheld:
+            LOGGER.error("Encountered a withheld tweet %s", new_tweet.tweet_id)
+            tombstone_label = tweet_html.select_one(".Tombstone .Tombstone-label").text
+            new_tweet.text = tombstone_label.strip()
+            if "withheld in response to a report from the copyright holder" in new_tweet.text:
+                # as per info in https://developer.twitter.com/en/docs/tweets/data-dictionary/overview/user-object
+                # “XY” - Content is withheld due to a DMCA request.
+                takedown_type = "XY"
+            else:
+                takedown_type = "unknown"
+            new_tweet.withheld_in = takedown_type
+            new_tweet.timestamp = 0
+            new_tweet.has_video = False
+            new_tweet.image_count = 0
+            new_tweet.favorites = 0
+            new_tweet.retweets = 0
+            new_tweet.replies = 0
+            # favorites, retweets, replies and timestamp can be looked up through their api,
+            # but original text and attachments are lost
+            return new_tweet
+
+        new_tweet.timestamp = int(tweet_html.select_one(".js-short-timestamp").get("data-time").strip())
+
+        new_tweet.replying_to = None # need a second pass on specific threads to get reply chains
         qrt = tweet_html.select_one(".QuoteTweet-innerContainer")
-        self.qrt_id = qrt.get("data-item-id").strip() if qrt else None
+        new_tweet.qrt_id = qrt.get("data-item-id").strip() if qrt else None
 
-        poll_data, poll_finished = self._get_poll_data(tweet_html)
-        self.poll_data = poll_data
-        self.poll_finished = poll_finished
+        poll_data, poll_finished = new_tweet._get_poll_data(tweet_html)
+        new_tweet.poll_data = poll_data
+        new_tweet.poll_finished = poll_finished
 
-        self.has_video = bool(tweet_html.select(".js-stream-tweet .is-video"))
-        self.image_count = len(tweet_html.select(".js-stream-tweet .AdaptiveMedia-photoContainer img"))
+        new_tweet.has_video = bool(tweet_html.select(".js-stream-tweet .is-video"))
+        new_tweet.image_count = len(tweet_html.select(".js-stream-tweet .AdaptiveMedia-photoContainer img"))
         replies = tweet_html.select_one(".ProfileTweet-action--reply .ProfileTweet-actionCount").get("data-tweet-stat-count")
         retweets = tweet_html.select_one(".ProfileTweet-action--retweet .ProfileTweet-actionCount").get("data-tweet-stat-count")
         favorites = tweet_html.select_one(".ProfileTweet-action--favorite .ProfileTweet-actionCount").get("data-tweet-stat-count")
-        self.favorites = int(favorites)
-        self.retweets = int(retweets)
-        self.replies = int(replies)
+        new_tweet.favorites = int(favorites)
+        new_tweet.retweets = int(retweets)
+        new_tweet.replies = int(replies)
 
-        self.links: List[str] = []
-        self.embedded_link = self._get_embedded_link(tweet_html)
-        self.text = self._get_tweet_text(tweet_html)
+        #new_tweet.links: List[str] = []
+        new_tweet.embedded_link = new_tweet._get_embedded_link(tweet_html)
+        new_tweet.text = new_tweet._get_tweet_text(tweet_html)
 
         #if not self.embedded_link and self.links and not self.image_count:
         #    LOGGER.debug("Using last link in post as an embed link in tweet %s", self.tweet_id)
         #    self.embedded_link = self.links[-1]
+        return new_tweet
 
 
     def _get_tweet_text(self, tweet_html: BeautifulSoup) -> Optional[str]:
@@ -372,7 +406,7 @@ class Tweet(DeclarativeBase):
                     poi_label = a.text
                     poi_id = a.get("data-place-id")
                     LOGGER.debug("encountered poi location data:%s, id:%s, tweet_id:%s",
-                                   poi_label, poi_id, self.tweet_id)
+                                 poi_label, poi_id, self.tweet_id)
                     self.poi = f"{poi_label}:{poi_id}"
                     element_text = ""
                 else:
@@ -412,18 +446,29 @@ class Tweet(DeclarativeBase):
         elif "twitter-timeline-link" in element.attrs["class"]:
             if "data-expanded-url" in element.attrs:
                 element_text = element.get("data-expanded-url")
-                self.links.append(element_text)
+                #self.links.append(element_text)
                 if "u-hidden" in element.attrs["class"]:
                     # FIXME: decide what to do with withheld qrt links
                     # example: https://twitter.com/FakeUnicode/status/686654542574825473
                     if self.embedded_link:
-                        LOGGER.debug("card link = %s", self.embedded_link)
-                        LOGGER.debug("hidden link = %s", element_text)
-                        assert urlparse(self.embedded_link.rstrip("/")) == urlparse(element_text.rstrip("/"))
+                        #FIXME: decide whether embedded_link should always be the authoritative link
+                        #tweetarchiver._untangle_link() line:420 card link = http://thehill.com/homenews/campaign/353673-biden-rich-are-as-patriotic-as-the-poor?amp#referrer=https://www.google.com&amp_tf=From%20%251$s
+                        #tweetarchiver._untangle_link() line:421 hidden link = http://thehill.com/homenews/campaign/353673-biden-rich-are-as-patriotic-as-the-poor?amp#referrer=https://www.google.com&amp_tf=From%20%251%24s
+                        # the two urls link to the same article despite the differring fragments
+                        #FIXME: decide whether twitter's 'unsafe link warning' should be kept
+                        # unsafe links direct to https://twitter.com/safety/unsafe_link_warning?unsafe_link={original_url}
+                        # user is able to ignore the above warning and proceed to originally linked resource
+                        # so far only seen this for ask.fm links and some vpns
+                        if urlparse(self.embedded_link.rstrip("/")) != urlparse(element_text.rstrip("/")):
+                            LOGGER.warning("HIDDEN URL AND TWITTR CARD URL DIFFER IN TWEET %s", self.tweet_id)
+                            LOGGER.warning("card link = %s", self.embedded_link)
+                            LOGGER.warning("hidden link = %s", element_text)
 
                     elif not self.qrt_id:
-                        #TODO: do not warn for vine and qrt links
-                        LOGGER.warning("USING HIDDEN TIMELINE LINK AS EMBED LINK, TWEET:%s , LINK:%s", self.tweet_id, element_text)
+                        parsed_url = urlparse(element_text)
+                        # do not warn for vine urls (RIP vine)
+                        if parsed_url.netloc not in ("vine.co",):
+                            LOGGER.warning("Using hidden timeline link as embed link, TWEET:%s , LINK:%s", self.tweet_id, element_text)
                         self.embedded_link = element_text
                     # else: this is a quote RT, embed link not needed
                     # V link is displayed as a twitter card only, do not add it to text
@@ -449,19 +494,53 @@ class Tweet(DeclarativeBase):
         if not card_container:
             return None
 
+        #https://github.com/igorbrigadir/twitter-advanced-search
+
         card_name = card_container.get("data-card2-name")
+        #card_name:poll2choice_text_only
+        #card_name:poll3choice_text_only
+        #card_name:poll4choice_text_only
+        #card_name:poll2choice_image
+        #card_name:poll3choice_image
+        #card_name:poll4choice_image
         if card_name.startswith("poll"):
             # _get_poll_data already took care of this
             return None
+        if card_name in ("promo_video_convo", "promo_image_convo"):
+            #FIXME:handle amplify cards / promo_*_convo cards
+            # HASHTAG START THE CONVERSATION
+            # IN ALL MY YEARS OF USING TWITTER, NOT ONCE HAVE I SEEN THIS
+            # https://business.twitter.com/en/help/campaign-setup/conversational-ad-formats.html
+            # this usually puts a hidden timeline link in tweet, so the amplify card ends up as embedded link
+            LOGGER.error("ADVERTISEMENT CARD FOUND IN TWEET %s, SKIPPING", self.tweet_id)
+            return None
+        if card_name == "2586390716:message_me":
+            #FIXME: handle the private message shortcut
+            # this usually puts a hidden timeline link in tweet, so it will end up as embedded link anyway
+            LOGGER.error("FOUND PRIVATE MESSAGE SHORTCUT IN TWEET %s, SKIPPING", self.tweet_id)
+            return None
 
+        #card_name:promo_website
+
+        #card_name:promo_image_app - this one does not display correctly/at all in web twitter
+        #card_name:app
+
+        #card_name:summary
+        #card_name:summary_large_image
+
+        #card_name:audio - cards of audio serving sites - for example soundcloud
+        #card_name:player - youtube and others
+        #card_name:animated_gif
+
+        #LOGGER.error(card_container)
         frame_container = card_container.select_one("div")
         frame_url = frame_container.get("data-src")
         frame_url = f"https://twitter.com{frame_url}"
 
         LOGGER.debug("Downloading card frame from tweet %s", self.tweet_id)
         # authorization in form of referer header is required, otherwise 403 is returned
-        frame = download(frame_url, headers={"Referer":f"https://twitter.com/user/status/{self.tweet_id}"})
-        frame = BeautifulSoup(frame, HTML_PARSER)
+        frame_request = download(frame_url, headers={"Referer":f"https://twitter.com/user/status/{self.tweet_id}"})
+        frame = BeautifulSoup(frame_request.response.text, HTML_PARSER)
 
         embedded_link = frame.select_one(".TwitterCard .TwitterCard-container").get("href")
         if not embedded_link:
@@ -476,10 +555,18 @@ class Tweet(DeclarativeBase):
                 # avoid unnecessary redirects for links generated before t.co started fully encrypting traffic
                 embedded_link = f"{'https'}{embedded_link[4:]}"
             #FIXME: handle http errors
-            link_query = download(embedded_link, method="HEAD", return_response=True, allow_redirects=False)
-            if link_query.is_redirect:
-                LOGGER.debug("Detected redirect from '%s' to '%s'", embedded_link, link_query.headers["location"])
-                embedded_link = link_query.headers["location"]
+            head_request = download(embedded_link, method="HEAD", allow_redirects=False)
+            if head_request.response.is_redirect:
+                LOGGER.debug("Detected redirect from '%s' to '%s'",
+                             embedded_link, head_request.response.headers["location"])
+                embedded_link = head_request.response.headers["location"]
+
+        parsed_url = urlparse(embedded_link)
+        if parsed_url.netloc == "twitter.com":
+            # ignore twitter's warning, live on the edge
+            if parsed_url.path == "/safety/unsafe_link_warning":
+                embedded_link = parsed_url.query.split("=", maxsplit=1)[-1]
+                LOGGER.debug("Ignoring unsafe link warning for url=%s", embedded_link)
 
         LOGGER.debug("Card type: %s, Card link: %s", card_name, embedded_link)
         return embedded_link
@@ -503,7 +590,7 @@ class Tweet(DeclarativeBase):
         LOGGER.debug("Downloading poll frame from tweet %s", self.tweet_id)
         # authorization in form of referer header is required, otherwise 403 is returned
         poll_frame = download(frame_url, headers={"Referer":f"https://twitter.com/user/status/{self.tweet_id}"})
-        poll_frame = BeautifulSoup(poll_frame, HTML_PARSER)
+        poll_frame = BeautifulSoup(poll_frame.response.text, HTML_PARSER)
 
         card_serialized = poll_frame.select_one("[type=\"text/twitter-cards-serialization\"]").text
         card_serialized = json.loads(card_serialized)["card"]
@@ -533,7 +620,7 @@ class Tweet(DeclarativeBase):
             poll_object["votes_total"] += choice["votes"]
 
         assert len(poll_object["choices"]) == poll_object["choice_count"]
-        return poll_object, poll_object["is_open"]
+        return poll_object, not poll_object["is_open"]
 
 
     @classmethod
@@ -595,24 +682,44 @@ def scrape_tweets(username: str, min_id: int = 0, max_id: int = 0,
             query_url = f"{query_url} max_id:{max_id}"
 
         print("Scraping page", page_number, ":", query_url)
+        LOGGER.debug("Scraping page %s : %s", page_number, query_url)
         # rate limit to 1 request per page_delay seconds
         time.sleep(max(0, loop_start + page_delay - time.time()))
-        results_page = download(query_url)
+        results_page = download(query_url).response.text
+        results_page = BeautifulSoup(results_page, HTML_PARSER).select(".js-stream-tweet")
         loop_start = time.time()
-        results_page = BeautifulSoup(results_page, HTML_PARSER)
+        found_tweets = len(results_page)
+        if found_tweets and found_tweets != 20:
+            LOGGER.warning("Less than 20 results on this page (%s)", found_tweets)
+            time.sleep(max(0, loop_start + page_delay - time.time()))
+            results_page = download(query_url).response.text
+            loop_start = time.time()
+            results_page = BeautifulSoup(results_page, HTML_PARSER).select(".js-stream-tweet")
+            if found_tweets != len(results_page):
+                LOGGER.warning("Found %s tweets on the second try", len(results_page))
+            else:
+                LOGGER.warning("Same amount of tweets found on second attempt")
+
         max_id = 0
         new_tweets = []
-        for tweet_html in results_page.select(".js-stream-tweet"):
-            # it is theoretically possible for temporarily suspended accounts
-            # to still show up in search results just like regular tweets do
-            # but containing no actual content apart from suspension notice.
-            # When encountered, scraping must be stopped immediately
-            # TODO: detect suspended accounts
-            # found an example tweet while testing scraper on FakeUnicode
-            # tweet from user CarlyFiorina, ID: 600475491384995840
-            # referenced in https://twitter.com/FakeUnicode/status/686654542574825473
-            # search query: " https://twitter.com/search?f=tweets&vertical=default&q=from:CarlyFiorina max_id:600475491384995841 "
-            # IMPORTANT: QRTs quoting suspended accounts cannot be saved (they do not show up in search results)
+        for tweet_html in results_page:
+            # example of a tweet withheld due to copyright claim https://twitter.com/dodo/status/880524321390600192
+            # FIXME: QRTs which are PART OF A THREAD and quote suspended accounts do not show up in search results
+            # temporarily suspended accounts still show up in search results, but their contents
+            # cannot be read - stop scraping immediately if such results show up
+            # tweets withheld due to copyright notice show up as well but those are
+            #FIXME: early exit can lead to gaps in archived tweets
+            # should keep a record oftweet with highest id in database and last known good
+            # tweet from current scraping session - if early exit is needed, store this info
+            # in db and scrape that range again when/if account becomes readable again
+            if "withheld-tweet" in tweet_html.attrs["class"]:
+                tombstone_label = tweet_html.select_one(".js-stream-tweet .Tombstone .Tombstone-label")
+                if tombstone_label and "account is temporarily unavailable" in tombstone_label.text:
+                    LOGGER.error("This account has been suspended, content cannot be read, aborting!")
+                    max_id = 0
+                    new_tweets = []
+                    break
+
             max_id = tweet_html.get("data-tweet-id").strip()
             new_tweets.append(tweet_html)
             tweets_found += 1
@@ -623,16 +730,10 @@ def scrape_tweets(username: str, min_id: int = 0, max_id: int = 0,
             print("End reached, breaking")
             break
 
-        assert len(new_tweets) == 20
-
         page_number += 1
         if page_limit and page_number > page_limit:
             print(f"Page limit reached ({page_number})")
             break
-
-
-
-
 
         # do not include last seen tweet in next search
         max_id = int(max_id) - 1
