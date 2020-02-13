@@ -28,7 +28,7 @@ COMPAREVARS = [
 TEST_POLLS = [
     (
         #"https://twitter.com/FakeUnicode/status/1206075411794292736",
-        "https://twitter.com/search?f=tweets&vertical=default&q=from:FakeUnicode since_id:1206075411794292735 max_id:1206075411794292737",
+        "https://twitter.com/search?f=tweets&vertical=default&q=from:FakeUnicode since_id:1206075411794292735 max_id:1206075411794292736",
         Tweet(
             tweet_id=1206075411794292736, thread_id=1206075411794292736, timestamp=1576385760, account_id=2183231114,
             poll_data={"is_open": False, "choice_count": 4, "end_time": 1576472160, "winning_index": "3", "votes_total": 368,
@@ -40,7 +40,7 @@ TEST_POLLS = [
             text="Scotland is (per ISO) a state of Great Britain, with 3166-2 code GB-SCT. If (when) it gains independence, what should its 3166-1 [https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2] code be?\n\nTaken: SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ\n\nReserved: SF SU\n\nFree: AB SP SQ SW\n\n#Poll")),
     (
         #"https://twitter.com/dril/status/1090496580413579265",
-        "https://twitter.com/search?f=tweets&vertical=default&q=from:dril since_id:1090496580413579264 max_id:1090496580413579266",
+        "https://twitter.com/search?f=tweets&vertical=default&q=from:dril since_id:1090496580413579264 max_id:1090496580413579265",
         Tweet(
             tweet_id=1090496580413579265, thread_id=1090496580413579265, timestamp=1548829619, account_id=16298441,
             poll_data={"is_open": False, "choice_count": 2, "end_time": 1548829919, "winning_index": "1", "votes_total": 2660,
@@ -50,7 +50,7 @@ TEST_POLLS = [
             text="What is it that you first seek when inspecting a profile which presents a potential networking opportunity")),
     (
         #"https://twitter.com/waypoint/status/876841985956597761",
-        "https://twitter.com/search?f=tweets&vertical=default&q=from:waypoint since_id:876841985956597760 max_id:876841985956597762",
+        "https://twitter.com/search?f=tweets&vertical=default&q=from:waypoint since_id:876841985956597760 max_id:876841985956597761",
         Tweet(
             tweet_id=876841985956597761, thread_id=876841985956597761, timestamp=1497890395, account_id=2999703069,
             poll_data={"is_open": False, "choice_count": 3, "end_time": 1497976794, "winning_index": "3", "votes_total": 2604,
@@ -75,29 +75,31 @@ def livetest():
     for test_set in LIVE_TEST_SETS:
         passed = False
         for url, expected_tweet in test_set:
-            try:
-                downloaded_tweet = Tweet.from_html(BS(download(url).response.text, HTML_PARSER).select_one(".js-stream-tweet"))
-                for var in COMPAREVARS:
-                    left = getattr(downloaded_tweet, var)
-                    right = getattr(expected_tweet, var)
+            found_tweets = BS(download(url).response.text, HTML_PARSER)
+            found_tweets = found_tweets.select(".js-stream-tweet")
+            if not found_tweets:
+                LOGGER.error("Test query did not return any tweets (%s)", url)
+                continue
+            if len(found_tweets) > 1:
+                raise RuntimeError("Multiple tweets returned by test query, but only one was expected!")
 
-                    if left != right:
-                        LOGGER.error("Live test error in tweet %s", expected_tweet.tweet_id)
-                        LOGGER.error("varname    = %s", var)
-                        LOGGER.error("Downloaded = %s", [left])
-                        LOGGER.error("Expected   = %s", [right])
+            downloaded_tweet = Tweet.from_html(found_tweets[0])
+            for var in COMPAREVARS:
+                left = getattr(downloaded_tweet, var)
+                right = getattr(expected_tweet, var)
 
-                        raise RuntimeError("Failed live parser test!")
+                if left != right:
+                    LOGGER.error("Live test error in tweet %s", expected_tweet.tweet_id)
+                    LOGGER.error("varname    = %s", var)
+                    LOGGER.error("Downloaded = %s", [left])
+                    LOGGER.error("Expected   = %s", [right])
 
-                    passed = True
-                    # we only need to test one tweet per category, but more is included
-                    # for redundancy - in case tweets/accounts get deleted/suspended
-                    break
-            except requests.HTTPError as err:
-                if err.response.status_code == 404:
-                    pass
-                else:
-                    raise
+                    raise RuntimeError("Failed live parser test!")
+
+                passed = True
+                # we only need to test one tweet per category, but more is included
+                # for redundancy - in case tweets/accounts get deleted/suspended
+                break
 
         if not passed:
             raise RuntimeError("Could not retrieve any of the test tweets!")
