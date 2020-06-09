@@ -1,3 +1,7 @@
+## As of June 1st 2020, as a result of twitter's layout change, this project is abandoned
+While I think it would be possible to work around twitter's incomprehensible machine-generated `div` soup, I'm not willing to invest the time necessary to research this. If you find anything useful here, feel free to use it as you see fit.
+
+##
 This is a proof of concept for a twitter profile archiver. It downloads all publicly available tweets from a profile and saves them to sqlite database.
 
 ## Dependencies:
